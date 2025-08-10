@@ -138,6 +138,37 @@ void dl_remove_global_symbol(const char* name, uint32_t info)
     dl_raise("global symbol not found");
 }
 
+int dl_add_global_symbols(struct module_t* module)
+{
+    if (!module) {
+        dl_raise("invalid module");
+        return -1;
+    }
+
+    struct symbol_t* current = module->symbols;
+    while (current) {
+        if (dl_add_global_symbol(current->name, current->address, current->info) < 0) {
+            return -1;
+        }
+        current = current->next;
+    }
+    return 0;
+}
+
+void dl_remove_global_symbols(struct module_t* module)
+{
+    if (!module) {
+        dl_raise("invalid module");
+        return;
+    }
+
+    struct symbol_t* current = module->symbols;
+    while (current) {
+        dl_remove_global_symbol(current->name, current->info);
+        current = current->next;
+    }
+}
+
 struct symbol_t* dl_find_global_symbol(const char* name)
 {
     if (!name) {

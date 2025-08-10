@@ -211,8 +211,11 @@ static char * reloc_types[] = {
     "R_MIPS_JUMP_SLOT"
 };
 
+/**
+ * load context for the currently loading module
+ */
 struct load_context_t {
-    FILE* file;
+    FILE* file; 
     struct module_t* module;
     Elf32_Ehdr elf_header;
     Elf32_Phdr* elf_program_headers;
@@ -220,7 +223,12 @@ struct load_context_t {
     char* elf_section_nametable;
 };
 
-struct load_context_t* create_load_context(FILE* file) {
+/**
+ * create a new load context for a shared object
+ * @param file the file pointer for the shared object
+ * @return a pointer to the new load context, or NULL on failure
+ */
+static struct load_context_t* create_load_context(FILE* file) {
     struct load_context_t* ctx = (struct load_context_t*) malloc(sizeof(struct load_context_t));
     if (!ctx) {
         dl_raise("out of memory for load context");
@@ -234,7 +242,12 @@ struct load_context_t* create_load_context(FILE* file) {
     return ctx;
 }
 
-struct module_t* destroy_load_context(struct load_context_t* ctx) {
+/**
+ * destroy a load context, cleaning up any allocated resources
+ * @param ctx the load context to destroy
+ * @return the loaded module or NULL if the context was invalid
+ */
+static struct module_t* destroy_load_context(struct load_context_t* ctx) {
     printf("destroying load context\n");
     if (!ctx) return NULL;
     if (ctx->elf_section_nametable) free(ctx->elf_section_nametable);
@@ -245,6 +258,13 @@ struct module_t* destroy_load_context(struct load_context_t* ctx) {
     return module;
 }
 
+/**
+ * resolve a symbol in the module's symbol table
+ * @param module the module containing the symbol
+ * @param dynsym_index the index of the symbol in the dynamic symbol table
+ * @return a pointer to the symbol's address, or NULL if not found
+ * used by the lazy linker
+ */
 void* dl_resolve(struct module_t* module, uint32_t dynsym_index) {
     Elf32_Sym* symbol = &module->loader_context.dynsym[dynsym_index];
     if(symbol->st_name == STN_UNDEF) {
@@ -269,6 +289,10 @@ void* dl_resolve(struct module_t* module, uint32_t dynsym_index) {
     return resolved->address;
 }
 
+/**
+ * lazy resolver stub stored in the global offset table
+ * @note do not call!
+ */
 void dl_resolve_stub()
 {
     asm volatile (
@@ -293,6 +317,8 @@ void dl_resolve_stub()
 struct module_t* dl_load_module(FILE* file)
 {
     struct load_context_t* ctx = create_load_context(file);
+
+    // read elf header and check it
 
     if (fread(&ctx->elf_header, sizeof(Elf32_Ehdr), 1, ctx->file) != 1) {
         destroy_load_context(ctx);
@@ -423,6 +449,8 @@ struct module_t* dl_load_module(FILE* file)
         return NULL;
     }
 
+    // calculate module size by adding up all LOAD segments, may cause memory waste
+
     size_t module_size = 0;
 
     printf("program headers\n");
@@ -453,6 +481,8 @@ struct module_t* dl_load_module(FILE* file)
         }
     }    
 
+    // allocate module memory
+
     printf("module size: 0x%08X\n", module_size);
     ctx->module = dl_allocate_module(module_size);
     if (!ctx->module) {
@@ -461,6 +491,8 @@ struct module_t* dl_load_module(FILE* file)
         return NULL;
     }
     printf("module base allocated at %p\n", ctx->module->base);
+
+    // read sections, locate .dynamic, .dynsym and .dynstr sections
 
     Elf32_Section dynamic_index = 0, dynsym_index = 0, dynstr_index = 0;
 
@@ -485,6 +517,8 @@ struct module_t* dl_load_module(FILE* file)
                section->sh_addralign,
                section_name
         );
+
+        // load ALLOC sections into the module base
 
         if(section->sh_flags & SHF_ALLOC) {
             if(section->sh_addr + section->sh_size > module_size) {
@@ -518,6 +552,8 @@ struct module_t* dl_load_module(FILE* file)
             break;
         }
     }
+
+    // check if all sections were found
 
     if(dynamic_index) {
         printf("dynamic table found at offset 0x%08lX\n", ctx->elf_sections[dynamic_index].sh_offset);
@@ -554,9 +590,13 @@ struct module_t* dl_load_module(FILE* file)
         return NULL;
     }
 
+    // parse dynamic tags
+    
     printf("dynamic tags\n");
     printf("###: tag                          value\n");
     
+    // count NEEDED tags to allocate dependency array
+
     size_t needed_count = 0;
     uint32_t needed_index = 0;
     for(size_t j = 0; j < ctx->module->loader_context.dynamic_count; j++) {
@@ -619,12 +659,16 @@ struct module_t* dl_load_module(FILE* file)
         }
     }
 
+    // TODO: implement base address relocation
+
     if(ctx->module->loader_context.base_address != 0) {
         struct module_t* module = destroy_load_context(ctx);
         dl_free_module(module);
         dl_raise("base address is not zero");
         return NULL;
     }
+
+    // relocate global offset table
 
     uint32_t got_local_count = ctx->module->loader_context.local_gotno;
     uintptr_t* got_local_base = (uintptr_t*) (ctx->module->base + ctx->module->loader_context.pltgot);
@@ -668,8 +712,12 @@ struct module_t* dl_load_module(FILE* file)
         got_global_base[i] = relocated;
     }
 
+    // install lazy resolver and module pointer
+
     got_local_base[0] = (uintptr_t) dl_resolve_stub;
     got_local_base[1] = (uintptr_t) ctx->module; // module pointer (GNU extension)
+
+    // find and relocate sections
 
     printf("finding relocatable sections\n");
     for(Elf32_Section i = 0; i < ctx->elf_header.e_shnum; i++) {
@@ -741,9 +789,11 @@ struct module_t* dl_load_module(FILE* file)
             // A - EA + S
             if(ELF32_R_SYM(reloc->r_info) < ctx->module->loader_context.gotsym) {
                 // local symbol
+                // TODO: check this
                 relocated = (uintptr_t) ctx->module->base + *reloc_target;
             } else {
                 // global symbol
+                // TODO: check this
                 relocated = (uintptr_t) ctx->module->base + got_global_base[ELF32_R_SYM(reloc->r_info) - ctx->module->loader_context.gotsym] + *reloc_target;
             }
 
@@ -755,7 +805,11 @@ struct module_t* dl_load_module(FILE* file)
 
     }
 
+    // everything is loaded, destroy the load context
+
     struct module_t* module = destroy_load_context(ctx);
+
+    // count 'exported' symbols
 
     size_t symbol_count = 0;
     uint32_t symbol_index = 0;
@@ -774,6 +828,8 @@ struct module_t* dl_load_module(FILE* file)
         dl_raise("out of memory for module symbols");
         return NULL;
     }
+
+    // print symbols and copy 'exported' symbols
 
     printf("module symbols\n");
     printf("######: size     address  type           bind        index name\n");
@@ -806,10 +862,13 @@ struct module_t* dl_load_module(FILE* file)
                 sym->st_shndx, name);
     }
 
+    // new code, new cache
+
     FlushCache(2);
     FlushCache(0);
 
     // print module name and dependencies
+
     printf("module name: %s\n", module->name);
     for(size_t i = 0; module->dependencies[i]; i++) {
         printf("  dependency: %s\n", module->dependencies[i]);

@@ -2,3 +2,9 @@
 /browser
 /project
 /template
+*.a
+*.o
+*.d
+*.so
+*.erl
+*.elf
